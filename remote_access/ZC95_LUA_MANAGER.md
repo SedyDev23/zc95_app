@@ -5,7 +5,8 @@ A small Windows GUI for a ZC95 connected over WiFi, with two views picked by the
 - **Scripts** (shown when the app opens): list, upload and delete Lua scripts, like `lua_manage.py` / `lua_upload.py`.
 - **Control**: start a pattern and drive it, like the browser remote in `webgui.py`.
 
-It uses `lib/ZcWs.py` and `lib/ZcMessages.py` over a single connection to the ZC95.
+Its layout and colours match the browser version, the ZC95 Web Manager. It uses `lib/ZcWs.py` and
+`lib/ZcMessages.py` over a single connection to the ZC95.
 
 ## What to install
 
@@ -30,10 +31,12 @@ Keep `zc95_lua_manager.py` next to the `lib` folder.
 
 ## Common to both views
 
-- **ZC95 IP**: the dot at the top turns green when the ZC95 answers (checked every 5 seconds).
+- **ZC95 IP**: type the address and click **Connect** (or press Enter). The status at the top right turns
+  green when the ZC95 answers, and says "connected" once the app is talking to it. It's checked every 5 seconds.
 - **Save settings** stores the current IP and scripts folder so they're filled in next time the app opens.
-- **Dark mode** (top right) switches the theme; the choice is remembered straight away.
-- The **Log** pane shows connection messages, errors from the ZC95, and `print()` output from running Lua scripts.
+- The **sun / moon button** (top right) switches between light and dark; the choice is remembered straight away.
+- The **Log** at the bottom shows timestamped connection messages, errors from the ZC95 (in red), and
+  `print()` output from running Lua scripts. **Clear** empties it.
 
 Settings are kept in `%APPDATA%\zc95_lua_manager\settings.json`.
 
@@ -41,14 +44,15 @@ Settings are kept in `%APPDATA%\zc95_lua_manager\settings.json`.
 
 1. When the ZC95 comes online, the **Scripts on ZC95** list on the right fills in automatically. **Refresh** reloads it.
 2. Enter or **Browse...** to a folder of `.lua` scripts and click **Read**. The scripts are listed on the left.
-3. Select a script, pick a slot (0-4) from the **Slot** drop-down, and click **Upload**
-   (double-clicking a script also uploads it). Clicking a slot on the right also selects it in the drop-down.
-4. **Delete slot** removes the selected script from the ZC95 (asks first).
+3. Click a script on the left, then click the index position (slot 0-4) on the right to upload it to.
+   The button shows what will happen, e.g. **Upload fire.lua to slot 2**. Click it to upload.
+   No slot is chosen when the app opens, so you can't overwrite one by accident.
+4. **Delete slot** removes the script in the selected slot from the ZC95 (asks first).
 
 ## Control view
 
 1. Pick a pattern from the **Pattern** list and click **Start**. The list is reloaded each time you open the
-   Control view (so newly uploaded scripts appear); **Reload list** refreshes it by hand.
+   Control view (so newly uploaded scripts appear); the **↻** button refreshes it by hand.
 2. While a pattern runs:
    - **Pattern settings** shows its menu options: sliders with -/+ for numeric values, buttons for choices.
      Changes made on the ZC95's own front panel show up here too.
@@ -56,6 +60,7 @@ Settings are kept in `%APPDATA%\zc95_lua_manager\settings.json`.
    - **Channel power**: each channel has a power slider (-/+ step 1%). The bar shows the power the box is
      using (blue), the actual output (yellow) and, if set, the front-panel power limit (green, hatched beyond it).
      Power changes are sent at most every 250 ms, the same as the web UI.
+   - If the window is too short for all the settings and channels, that area scrolls.
    - Patterns marked **(!) triphase** show a warning, as in the web UI.
 3. **Stop** stops the pattern and returns to the pattern list.
 
