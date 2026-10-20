@@ -56,6 +56,12 @@ THEMES = {
 }
 
 
+def slot_is_empty(script):
+  """The ZC95 names an empty Lua slot "<empty>" (or leaves the name blank)."""
+  name = (script.get("Name") or "").strip()
+  return not name or name.lower() == "<empty>"
+
+
 class LogWriter:
   """Stands in for sys.stdout/stderr so the lib's print() output lands in the log pane
   (and so pythonw, which has no stdout, doesn't crash on print)."""
@@ -1180,10 +1186,11 @@ class App(tk.Tk):
   def show_remote(self, scripts):
     c = self.colors()
     self.remote_list.delete(0, "end")
-    self.remote_scripts = scripts
-    for i, script in enumerate(scripts):
-      self.remote_list.insert("end", str(script["Index"]) + " - " + (script.get("Name") or "(empty)"))
-      if not script.get("Name"):
+    # The ZC95 sends the slots 4 down to 0; list them 0 to 4
+    self.remote_scripts = sorted(scripts, key=lambda script: script["Index"])
+    for i, script in enumerate(self.remote_scripts):
+      self.remote_list.insert("end", str(script["Index"]) + " - " + (script.get("Name") or "<empty>"))
+      if slot_is_empty(script):
         self.remote_list.itemconfigure(i, foreground=c["muted"])
       if script["Index"] == self.selected_slot:
         self.remote_list.selection_set(i)   # keep the chosen slot highlighted after a reload
@@ -1413,7 +1420,7 @@ class App(tk.Tk):
     for listbox in (self.local_list, self.remote_list):
       listbox.configure(bg=c["page"], fg=c["text"], selectbackground=c["accent"], selectforeground=c["accent_text"])
     for i, script in enumerate(self.remote_scripts):
-      if not script.get("Name"):
+      if slot_is_empty(script):
         self.remote_list.itemconfigure(i, foreground=c["muted"])
     self.log.configure(bg=c["card"], fg=c["muted"], insertbackground=c["text"])
     self.log.tag_configure("error", foreground=c["danger"] if not dark else "#ff6b5e")
