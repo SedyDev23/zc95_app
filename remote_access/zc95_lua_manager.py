@@ -197,6 +197,40 @@ def rounded_png(w, h, r, fill, outline=None, line=1, samples=4, shape=None, offs
   return base64.b64encode(png).decode("ascii")
 
 
+@functools.lru_cache(maxsize=None)
+def chevron_png(w, h, color, line=1.6, samples=4):
+  """Base64 PNG of a small down-pointing chevron (the dropdown arrow), on a transparent background."""
+  rgb = _rgb(color)
+  pad = line
+  # The chevron is two strokes: top-left -> bottom-middle -> top-right
+  ax, ay, bx, by, cx, cy = pad, pad, w / 2, h - pad, w - pad, pad
+
+  def near_segment(px, py, x0, y0, x1, y1):
+    dx, dy = x1 - x0, y1 - y0
+    t = max(0, min(1, ((px - x0) * dx + (py - y0) * dy) / (dx * dx + dy * dy)))
+    return (px - x0 - t * dx) ** 2 + (py - y0 - t * dy) ** 2 <= (line / 2) ** 2
+
+  step = 1.0 / samples
+  rows = bytearray()
+  for y in range(h):
+    rows.append(0)
+    for x in range(w):
+      hits = 0
+      for sy in range(samples):
+        for sx in range(samples):
+          px, py = x + (sx + 0.5) * step, y + (sy + 0.5) * step
+          if near_segment(px, py, ax, ay, bx, by) or near_segment(px, py, bx, by, cx, cy):
+            hits += 1
+      rows += bytes(rgb + (255 * hits // (samples * samples),))
+
+  def chunk(kind, data):
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff)
+
+  png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+         + chunk(b"IDAT", zlib.compress(bytes(rows))) + chunk(b"IEND", b""))
+  return base64.b64encode(png).decode("ascii")
+
+
 class Skin:
   """Creates the rounded ttk image elements once, and redraws their images in place on a theme change."""
 
@@ -206,8 +240,8 @@ class Skin:
     self.images = {}
     self.created = set()
 
-  def image(self, key, w, h, r, fill, outline=None, line=1):
-    data = rounded_png(w, h, r, fill, outline, line)
+  def image(self, key, w, h, r, fill, outline=None, line=1, data=None):
+    data = data or rounded_png(w, h, r, fill, outline, line)
     img = self.images.get(key)
     if img is None:
       img = self.images[key] = tk.PhotoImage(master=self.root, data=data)
@@ -1329,14 +1363,20 @@ class App(tk.Tk):
     s.layout("TEntry", [("Field.field", {"sticky": "nsew", "children": [
       ("Entry.padding", {"sticky": "nsew", "children": [("Entry.textarea", {"sticky": "nsew"})]})]})])
     s.configure("TEntry", padding=(0, 1), foreground=c["text"])
+    # The dropdown arrow is a drawn chevron with no box behind it, so the combobox's background can be
+    # the card colour (it shows in the field's rounded corners, like every other widget on a card)
+    arrow = self.skin.image("Field.downarrow", 0, 0, 0, None, data=chevron_png(12, 7, c["text"]))
+    if "Field.downarrow" not in self.skin.created:
+      s.element_create("Field.downarrow", "image", arrow, sticky="", padding=(6, 0, 2, 0))
+      self.skin.created.add("Field.downarrow")
     s.layout("TCombobox", [("Field.field", {"sticky": "nsew", "children": [
-      ("Combobox.downarrow", {"side": "right", "sticky": "ns"}),
+      ("Field.downarrow", {"side": "right", "sticky": ""}),
       ("Combobox.padding", {"sticky": "nsew", "children": [("Combobox.textarea", {"sticky": "nsew"})]})]})])
-    s.configure("TCombobox", padding=(0, 1), arrowcolor=c["text"], background=c["page"], bordercolor=c["page"],
-                lightcolor=c["page"], darkcolor=c["page"], arrowsize=13)
+    s.configure("TCombobox", padding=(0, 1), background=c["card"])
     s.map("TCombobox", fieldbackground=[("readonly", c["page"])], foreground=[("readonly", c["text"])],
           selectbackground=[("readonly", c["page"])], selectforeground=[("readonly", c["text"])],
-          background=[("active", c["page"]), ("readonly", c["page"])])
+          background=[("disabled", c["card"]), ("pressed", c["card"]), ("active", c["card"]), ("readonly", c["card"])])
+    s.map("TEntry", background=[("disabled", c["card"]), ("active", c["card"]), ("focus", c["card"])])
 
     # ----- slim rounded scrollbars (on cards, and inside the list wells) -----
     k.element("Slim.thumb", 4, [("", c["thumb"], None), ("active", c["thumb_active"], None)],
