@@ -43,5 +43,5 @@ Windows desktop app (`zc95_lua_manager.py` and its launcher and documentation).
 
 ## Licence
 
-TODO: add a `LICENSE` file that matches the ZC95 project's licence before publishing. The files copied from
-that project stay under its licence.
+GNU General Public License v3.0, the same as the ZC95 project; see [LICENSE](LICENSE). The files copied from
+the ZC95 project remain under that project's copyright.
