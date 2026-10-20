@@ -1279,13 +1279,14 @@ class App(tk.Tk):
                                       ("pressed", c["border"], c["border"]), ("active", c["hover"], c["border"])])
     k.button("TButton", "Secondary.border")
     s.configure("TButton", background=c["card"], foreground=c["text"], padding=(14, 5), font=bold, anchor="center")
-    s.map("TButton", foreground=[("disabled", c["muted"])])
+    # clam changes a button's background on hover/press; it shows through the rounded corners, so pin it
+    s.map("TButton", foreground=[("disabled", c["muted"])], background=[("disabled", c["card"]), ("pressed", c["card"]), ("selected", c["card"]), ("active", c["card"])])
 
     k.element("Primary.border", 9, [("", c["accent"], None), ("disabled", c["border"], None),
                                     ("pressed", c["accent_active"], None), ("active", c["accent_active"], None)])
     k.button("Primary.TButton", "Primary.border")
     s.configure("Primary.TButton", foreground=c["accent_text"])
-    s.map("Primary.TButton", foreground=[("disabled", c["muted"])])
+    s.map("Primary.TButton", foreground=[("disabled", c["muted"])], background=[("disabled", c["card"]), ("pressed", c["card"]), ("selected", c["card"]), ("active", c["card"])])
 
     k.element("Danger.border", 9, [("", c["danger"], None), ("pressed", c["danger_active"], None),
                                    ("active", c["danger_active"], None)])
@@ -1295,7 +1296,7 @@ class App(tk.Tk):
     k.element("Hold.border", 12, [("", c["page"], c["border"]), ("pressed", c["accent"], None),
                                   ("active", c["hover"], c["border"])])
     k.button("Hold.TButton", "Hold.border")
-    s.map("Hold.TButton", foreground=[("pressed", c["accent_text"])])
+    s.map("Hold.TButton", foreground=[("pressed", c["accent_text"])], background=[("disabled", c["card"]), ("pressed", c["card"]), ("selected", c["card"]), ("active", c["card"])])
 
     k.button("Step.TButton", "Secondary.border")
     s.configure("Step.TButton", padding=(0, 3), width=3, font=(FONT, 12))
@@ -1303,6 +1304,7 @@ class App(tk.Tk):
     k.element("Icon.border", 15, [("", c["card"], c["border"]), ("active", c["hover"], c["border"])])
     k.button("Icon.TButton", "Icon.border")
     s.configure("Icon.TButton", background=c["page"], padding=(9, 4), width=2, font=(FONT, 11))
+    s.map("Icon.TButton", background=[("disabled", c["page"]), ("pressed", c["page"]), ("selected", c["page"]), ("active", c["page"])])
 
     s.layout("Link.TButton", [("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})])
     s.configure("Link.TButton", background=c["card"], foreground=c["muted"], borderwidth=0, padding=(2, 0),
@@ -1314,13 +1316,13 @@ class App(tk.Tk):
     k.element("Tab.border", 13, [("", c["card"], None), ("selected", c["accent"], None), ("active", c["hover"], None)])
     k.button("Tab.Toolbutton", "Tab.border", label="Toolbutton")
     s.configure("Tab.Toolbutton", background=c["card"], foreground=c["muted"], padding=(18, 5), font=bold)
-    s.map("Tab.Toolbutton", foreground=[("selected", c["accent_text"]), ("active", c["text"])])
+    s.map("Tab.Toolbutton", foreground=[("selected", c["accent_text"]), ("active", c["text"])], background=[("disabled", c["card"]), ("pressed", c["card"]), ("selected", c["card"]), ("active", c["card"])])
 
     k.element("Choice.border", 14, [("", c["page"], c["border"]), ("selected", c["accent"], None),
                                     ("active", c["hover"], c["border"])])
     k.button("Choice.Toolbutton", "Choice.border", label="Toolbutton")
     s.configure("Choice.Toolbutton", background=c["card"], foreground=c["text"], padding=(16, 5))
-    s.map("Choice.Toolbutton", foreground=[("selected", c["accent_text"])])
+    s.map("Choice.Toolbutton", foreground=[("selected", c["accent_text"])], background=[("disabled", c["card"]), ("pressed", c["card"]), ("selected", c["card"]), ("active", c["card"])])
 
     # ----- rounded text fields (Entry, Combobox) with a red outline when focused -----
     k.element("Field.field", 9, [("", c["page"], c["border"]), ("focus", c["page"], c["accent"])], padding=(10, 6))
