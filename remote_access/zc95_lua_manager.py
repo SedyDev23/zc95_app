@@ -30,6 +30,9 @@ from tkinter import filedialog, messagebox, ttk
 # Make "lib.*" importable no matter where the app is launched from
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, APP_DIR)
+# Where the user's files live: next to the .exe when built with PyInstaller (APP_DIR is then a temp
+# unpack folder), otherwise this script's folder
+HOME_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else APP_DIR
 
 import lib.ZcMessages as zc  # noqa: E402
 from lib.ZcWs import ZcWs  # noqa: E402
@@ -233,6 +236,51 @@ def chevron_png(w, h, color, line=1.6, samples=4):
     return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff)
 
   png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+         + chunk(b"IDAT", zlib.compress(bytes(rows))) + chunk(b"IEND", b""))
+  return base64.b64encode(png).decode("ascii")
+
+
+@functools.lru_cache(maxsize=None)
+def icon_png(size, samples=4):
+  """Base64 PNG of the app icon: a red rounded square with a white "Z". Also used to build zc95.ico."""
+  red, white = _rgb(THEMES["light"]["accent"]), (255, 255, 255)
+  r = size * 0.22
+  stroke = size * 0.11
+  # The Z as three strokes, in fractions of the icon size
+  segments = [(0.30, 0.30, 0.70, 0.30), (0.70, 0.30, 0.30, 0.70), (0.30, 0.70, 0.70, 0.70)]
+  segments = [tuple(v * size for v in seg) for seg in segments]
+
+  def on_stroke(px, py):
+    for x0, y0, x1, y1 in segments:
+      dx, dy = x1 - x0, y1 - y0
+      t = max(0, min(1, ((px - x0) * dx + (py - y0) * dy) / (dx * dx + dy * dy)))
+      if (px - x0 - t * dx) ** 2 + (py - y0 - t * dy) ** 2 <= (stroke / 2) ** 2:
+        return True
+    return False
+
+  step = 1.0 / samples
+  rows = bytearray()
+  for y in range(size):
+    rows.append(0)
+    for x in range(size):
+      acc = [0, 0, 0]
+      hits = 0
+      for sy in range(samples):
+        for sx in range(samples):
+          px, py = x + (sx + 0.5) * step, y + (sy + 0.5) * step
+          if not _in_rounded_rect(px, py, 0, 0, size, size, r):
+            continue
+          c = white if on_stroke(px, py) else red
+          acc[0] += c[0]; acc[1] += c[1]; acc[2] += c[2]; hits += 1
+      if hits:
+        rows += bytes((acc[0] // hits, acc[1] // hits, acc[2] // hits, 255 * hits // (samples * samples)))
+      else:
+        rows += b"\0\0\0\0"
+
+  def chunk(kind, data):
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff)
+
+  png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
          + chunk(b"IDAT", zlib.compress(bytes(rows))) + chunk(b"IEND", b""))
   return base64.b64encode(png).decode("ascii")
 
@@ -823,6 +871,8 @@ class App(tk.Tk):
   def __init__(self):
     super().__init__()
     self.title("ZC95 Lua Manager")
+    self.icons = [tk.PhotoImage(master=self, data=icon_png(size)) for size in (64, 32)]
+    self.iconphoto(True, *self.icons)
     self.geometry("1000x760")
     self.minsize(780, 560)
 
@@ -841,7 +891,7 @@ class App(tk.Tk):
 
     settings = self.load_settings()
     self.ip_var = tk.StringVar(value=settings.get("ip", ""))
-    self.path_var = tk.StringVar(value=settings.get("path", os.path.join(APP_DIR, "lua")))
+    self.path_var = tk.StringVar(value=settings.get("path", os.path.join(HOME_DIR, "lua")))
     self.dark_var = tk.BooleanVar(value=settings.get("dark", False))
     self.view_var = tk.StringVar(value="scripts")  # always opens on the Scripts view
     self.status_var = tk.StringVar(value="Checking...")
@@ -1142,7 +1192,7 @@ class App(tk.Tk):
   # ---------- Local scripts ----------
 
   def browse(self):
-    folder = filedialog.askdirectory(initialdir=self.path_var.get() or APP_DIR)
+    folder = filedialog.askdirectory(initialdir=self.path_var.get() or HOME_DIR)
     if folder:
       self.path_var.set(os.path.normpath(folder))
       self.read_folder()

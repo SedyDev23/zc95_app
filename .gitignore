@@ -4,3 +4,9 @@ __pycache__/
 .venv/
 venv/
 settings.json
+
+# Exe build output (see build_exe.bat) - the exe is published as a GitHub Release, not committed
+.build-venv/
+remote_access/dist/
+remote_access/build/work/
+remote_access/build/*.ico

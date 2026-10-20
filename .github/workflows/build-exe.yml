@@ -1,0 +1,60 @@
+# Builds "ZC95 Lua Manager.exe" on GitHub's Windows machines.
+#
+# - Push a version tag (e.g. v1.0) and the exe is attached to a new GitHub Release:
+#     git tag v1.0
+#     git push origin v1.0
+# - Or run it by hand from the repo's Actions tab ("Build Windows exe" > "Run workflow");
+#   the zip is then available under that run's Artifacts.
+name: Build Windows exe
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to create the Release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build exe
+        shell: cmd
+        run: remote_access\build_exe.bat
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $name = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "build-${{ github.run_number }}" }
+          $zip = "ZC95-Lua-Manager-$name.zip"
+          $stage = "ZC95 Lua Manager"
+          New-Item -ItemType Directory $stage | Out-Null
+          Copy-Item "remote_access\dist\ZC95 Lua Manager.exe" $stage
+          Copy-Item -Recurse remote_access\dist\lua "$stage\lua"
+          Copy-Item remote_access\ZC95_LUA_MANAGER.md, LICENSE $stage
+          Compress-Archive -Path $stage -DestinationPath $zip
+          "ZIP=$zip" | Out-File -Append $env:GITHUB_ENV
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ZC95-Lua-Manager
+          path: ${{ env.ZIP }}
+
+      - name: Attach to Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ZIP }}
+          body: |
+            Windows app for managing and controlling a ZC95 over WiFi.
+
+            **Download** the zip below, unzip it, and run `ZC95 Lua Manager.exe`; Python isn't needed.
+            The `lua` folder has example scripts. Windows may warn about an unrecognised app the first
+            time (the exe isn't code-signed): click **More info**, then **Run anyway**.

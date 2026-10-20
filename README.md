@@ -9,7 +9,16 @@ A Windows desktop app for a [ZC95](https://github.com/CrashOverride85/zc95) conn
 
 Also included: dark mode, and a log pane that shows ZC95 errors and Lua `print()` output.
 
-## Quick start
+## Option 1: download the app (no Python needed)
+
+1. Go to [Releases](https://github.com/SedyDev23/zc95_app/releases) and download the latest
+   `ZC95-Lua-Manager-....zip`.
+2. Unzip it and run **`ZC95 Lua Manager.exe`**. The `lua` folder next to it has example scripts.
+
+The exe isn't code-signed, so the first time Windows may show "Windows protected your PC". Click
+**More info**, then **Run anyway**.
+
+## Option 2: run from the source code
 
 1. Install **Python 3.8+** from [python.org](https://www.python.org/downloads/windows/). Tick
    "Add python.exe to PATH" and keep "tcl/tk" selected.
@@ -24,6 +33,23 @@ Also included: dark mode, and a log pane that shows ZC95 errors and Lua `print()
 
 See [remote_access/ZC95_LUA_MANAGER.md](remote_access/ZC95_LUA_MANAGER.md) for full instructions.
 
+## Building the exe
+
+**On your PC:** double-click `remote_access\build_exe.bat` (needs Python and an internet connection the
+first time). It makes its own build environment in `.build-venv`, so nothing is installed into your main
+Python, and produces `remote_access\dist\ZC95 Lua Manager.exe` with the example scripts in `dist\lua`.
+
+**On GitHub, as a Release:** push a version tag and GitHub builds the exe and attaches the zip to a new
+Release automatically:
+
+```
+git tag v1.0
+git push origin v1.0
+```
+
+You can also run the build by hand from the repo's **Actions** tab ("Build Windows exe" > "Run workflow");
+the zip then appears under that run's Artifacts. The workflow is `.github/workflows/build-exe.yml`.
+
 ## What's in here
 
 | Path | |
@@ -31,6 +57,8 @@ See [remote_access/ZC95_LUA_MANAGER.md](remote_access/ZC95_LUA_MANAGER.md) for f
 | `remote_access/zc95_lua_manager.py` | The desktop app (Tkinter) |
 | `remote_access/ZC95 Lua Manager.bat` | Launcher with no console window |
 | `remote_access/ZC95_LUA_MANAGER.md` | How to install and use the app |
+| `remote_access/build_exe.bat`, `build/make_icon.py`, `requirements-build.txt` | Build the standalone exe |
+| `.github/workflows/build-exe.yml` | Builds the exe on GitHub and attaches it to a Release |
 | `remote_access/lib/`, `lua_manage.py`, `lua_upload.py`, `pattern_list.py`, `pattern_gui.py`, `webgui.py`, `web_static/` | Remote-access code from the ZC95 project, which the app uses |
 | `remote_access/lua/` | Example Lua scripts from the ZC95 project |
 | `remote_access/LuaNotes.md` | The ZC95 project's Lua scripting reference |
