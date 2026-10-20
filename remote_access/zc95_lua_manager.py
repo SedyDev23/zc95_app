@@ -11,16 +11,20 @@ Reuses lib/ZcWs.py and lib/ZcMessages.py over one websocket connection to the ZC
 Run:  py zc95_lua_manager.py        (or pyw zc95_lua_manager.py for no console)
 """
 
+import base64
 import ctypes
+import functools
 import json
 import os
 import queue
 import re
 import socket
+import struct
 import sys
 import threading
 import time
 import tkinter as tk
+import zlib
 from tkinter import filedialog, messagebox, ttk
 
 # Make "lib.*" importable no matter where the app is launched from
@@ -44,11 +48,11 @@ THEMES = {
   "light": {"page": "#f5f5f7", "card": "#ffffff", "text": "#1c1c1e", "muted": "#6b6b70", "border": "#d8d8de",
             "hover": "#ececf0", "accent": "#d32f2f", "accent_active": "#b71c1c", "accent_text": "#ffffff",
             "danger": "#b3261e", "danger_active": "#8e1b15", "ok": "#2e7d43", "warn": "#a06800",
-            "max": "#3b63c2", "actual": "#d6a600", "limit": "#2e7d43"},
+            "max": "#3b63c2", "actual": "#d6a600", "limit": "#2e7d43", "thumb": "#c4c4cc", "thumb_active": "#a0a0a8"},
   "dark":  {"page": "#14151a", "card": "#1f2129", "text": "#f0f0f2", "muted": "#9a9ba6", "border": "#33333f",
             "hover": "#2a2c36", "accent": "#d32f2f", "accent_active": "#e04848", "accent_text": "#ffffff",
             "danger": "#b3261e", "danger_active": "#cf3a30", "ok": "#3ba55c", "warn": "#e0a020",
-            "max": "#4d7cf0", "actual": "#ffd23f", "limit": "#3ba55c"},
+            "max": "#4d7cf0", "actual": "#ffd23f", "limit": "#3ba55c", "thumb": "#4a4c58", "thumb_active": "#6a6c78"},
 }
 
 
@@ -132,20 +136,269 @@ class ZcLink:
     self.conn = self.ws_thread = self.messages = None
 
 
+# ---------- Rounded skin ----------
+#
+# Tk can't round corners, so the rounded buttons, cards, fields and pills are small anti-aliased PNG
+# images drawn here (no image library needed) and used as ttk "image" elements. Each one is a
+# 9-slice: the corners stay fixed and the middle stretches to the widget's size.
+
+def _rgb(color):
+  return tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))
+
+
+def _in_rounded_rect(px, py, x0, y0, x1, y1, r):
+  cx = min(max(px, x0 + r), x1 - r)
+  cy = min(max(py, y0 + r), y1 - r)
+  return (px - cx) ** 2 + (py - cy) ** 2 <= r * r
+
+
+@functools.lru_cache(maxsize=None)   # switching back to a theme reuses its images
+def rounded_png(w, h, r, fill, outline=None, line=1, samples=4, shape=None, offset=(0, 0)):
+  """Base64 PNG of a w x h rounded rectangle (radius r) with an optional outline; outside is transparent.
+  With shape=(width, height) and offset, it renders just that w x h window of a larger rounded shape
+  (used to cut out the four corners of a panel)."""
+  f = _rgb(fill)
+  o = _rgb(outline) if outline else f
+  sw, sh = shape or (w, h)
+  ox, oy = offset
+  step = 1.0 / samples
+  rows = bytearray()
+  solid_fill = bytes(f + (255,))
+  solid_outline = bytes(o + (255,))
+  for y in range(h):
+    rows.append(0)   # PNG filter type: none
+    for x in range(w):
+      # Away from the four rounded corners the result is exact, so skip the anti-aliasing there
+      x0, y0 = ox + x, oy + y
+      if (r + 1 <= x0 and x0 + 1 <= sw - r - 1) or (r + 1 <= y0 and y0 + 1 <= sh - r - 1):
+        edge = outline and (x0 < line or x0 + 1 > sw - line or y0 < line or y0 + 1 > sh - line)
+        rows += solid_outline if edge else solid_fill
+        continue
+      red = green = blue = hits = 0
+      for sy in range(samples):
+        py = oy + y + (sy + 0.5) * step
+        for sx in range(samples):
+          px = ox + x + (sx + 0.5) * step
+          if not _in_rounded_rect(px, py, 0, 0, sw, sh, r):
+            continue
+          inner = not outline or _in_rounded_rect(px, py, line, line, sw - line, sh - line, max(r - line, 0))
+          c = f if inner else o
+          red += c[0]; green += c[1]; blue += c[2]; hits += 1
+      if hits:
+        rows += bytes((red // hits, green // hits, blue // hits, 255 * hits // (samples * samples)))
+      else:
+        rows += b"\0\0\0\0"
+
+  def chunk(kind, data):
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff)
+
+  png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+         + chunk(b"IDAT", zlib.compress(bytes(rows))) + chunk(b"IEND", b""))
+  return base64.b64encode(png).decode("ascii")
+
+
+class Skin:
+  """Creates the rounded ttk image elements once, and redraws their images in place on a theme change."""
+
+  def __init__(self, root, style):
+    self.root = root
+    self.style = style
+    self.images = {}
+    self.created = set()
+
+  def image(self, key, w, h, r, fill, outline=None, line=1):
+    data = rounded_png(w, h, r, fill, outline, line)
+    img = self.images.get(key)
+    if img is None:
+      img = self.images[key] = tk.PhotoImage(master=self.root, data=data)
+    else:
+      img.configure(data=data)
+    return img
+
+  # ttk stretches an image element by *tiling* its centre, so a 1-pixel centre means thousands of draws
+  # for a wide widget (very slow). The centre is made big, and width/height keep the minimum size small.
+  CENTRE = 48
+
+  def element(self, name, r, states, padding=2, size=None, border=None, line=1, min_size=None):
+    """states: [(statespec, fill, outline), ...]; the first is the normal look, e.g. ("", red, None)."""
+    corner = 2 * (r + 1)
+    w, h = size or (corner + self.CENTRE, corner + self.CENTRE)
+    min_w, min_h = min_size or (corner + 1, corner + 1)
+    images = [(spec, self.image(name + ":" + (spec or "normal"), w, h, r, fill, outline, line))
+              for spec, fill, outline in states]
+    if name not in self.created:
+      maps = [tuple(spec.split()) + (img,) for spec, img in images[1:]]
+      self.style.element_create(name, "image", images[0][1], *maps,
+                                border=border if border is not None else r + 1, padding=padding,
+                                width=min_w, height=min_h, sticky="nsew")
+      self.created.add(name)
+
+  def button(self, style_name, element, label="Button"):
+    """Lay out a button (or Toolbutton) style as: rounded image > padding > label."""
+    self.style.layout(style_name, [(element, {"sticky": "nsew", "children": [
+      (label + ".padding", {"sticky": "nsew", "children": [(label + ".label", {"sticky": "nsew"})]})]})])
+
+_corner_images = {}
+
+
+def panel_corners(root, r, fill, outline):
+  """The four anti-aliased corners (nw, ne, sw, se) of a rounded panel, cached by look."""
+  key = (r, fill, outline)
+  if key not in _corner_images:
+    size = 2 * r + 2
+    _corner_images[key] = [
+      tk.PhotoImage(master=root, data=rounded_png(r, r, r, fill, outline, shape=(size, size), offset=(ox, oy)))
+      for ox, oy in ((0, 0), (size - r, 0), (0, size - r), (size - r, size - r))]
+  return _corner_images[key]
+
+
+class RoundPanel(tk.Frame):
+  """A rounded panel (card, list well, tab box, status pill). Put children in .inner.
+
+  The rounded background is drawn on a canvas placed *behind* the content, so it never takes part in
+  the layout. (ttk image-element frames do the same job, but got into an endless resize loop with pack.)"""
+
+  def __init__(self, parent, app, radius, fill, outline, behind, padding=16, inner_style="TFrame"):
+    super().__init__(parent, bd=0, highlightthickness=0)
+    self.app = app
+    self.radius = radius
+    self.keys = [fill, outline, behind]   # palette keys: panel colour, outline colour, colour around it
+    self.canvas = tk.Canvas(self, bd=0, highlightthickness=0)
+    self.canvas.place(x=0, y=0, relwidth=1, relheight=1)
+    self.tk.call("lower", self.canvas._w)   # (Canvas.lower() lowers canvas items, not the widget)
+    px, py = (padding, padding) if isinstance(padding, int) else (padding[0], padding[1])
+    self.inner = ttk.Frame(self, style=inner_style)
+    self.inner.pack(fill="both", expand=True, padx=px, pady=py)
+    self.canvas.bind("<Configure>", lambda e: self.draw())
+    app.panels.append(self)
+    self.draw()
+
+  def set_outline(self, key):
+    self.keys[1] = key
+    self.draw()
+
+  def draw(self):
+    c = self.app.colors()
+    fill, outline, behind = (c[k] for k in self.keys)
+    self.configure(bg=behind)
+    self.canvas.configure(bg=behind)
+    self.canvas.delete("all")
+    w, h, r = self.canvas.winfo_width(), self.canvas.winfo_height(), self.radius
+    if w < 2 * r or h < 2 * r:
+      return
+    self.canvas.create_rectangle(r, 0, w - r, h, fill=fill, width=0)
+    self.canvas.create_rectangle(0, r, w, h - r, fill=fill, width=0)
+    self.canvas.create_line(r, 0, w - r, 0, fill=outline)
+    self.canvas.create_line(r, h - 1, w - r, h - 1, fill=outline)
+    self.canvas.create_line(0, r, 0, h - r, fill=outline)
+    self.canvas.create_line(w - 1, r, w - 1, h - r, fill=outline)
+    nw, ne, sw, se = panel_corners(self, r, fill, outline)
+    self.canvas.create_image(0, 0, image=nw, anchor="nw")
+    self.canvas.create_image(w, 0, image=ne, anchor="ne")
+    self.canvas.create_image(0, h, image=sw, anchor="sw")
+    self.canvas.create_image(w, h, image=se, anchor="se")
+
+
+_thumb_images = {}
+
+
+def slider_thumb(root, colors):
+  """The round slider handle: accent fill with a white ring, as on the web page."""
+  key = (colors["accent"], colors["accent_text"])
+  if key not in _thumb_images:
+    _thumb_images[key] = tk.PhotoImage(master=root, data=rounded_png(22, 22, 11, colors["accent"], colors["accent_text"], 2))
+  return _thumb_images[key]
+
+
+class RoundSlider(tk.Canvas):
+  """A slider with a rounded track and a round red handle, like the web page's range inputs."""
+
+  HEIGHT = 26
+  TRACK = 8
+
+  def __init__(self, parent, from_, to, command, colors, resolution=1):
+    super().__init__(parent, height=self.HEIGHT, highlightthickness=0, bd=0)
+    self.from_, self.to, self.resolution = from_, to, resolution
+    self.command = command
+    self.value = from_
+    self.colors = colors
+    self.bind("<Configure>", lambda e: self.draw())
+    self.bind("<ButtonPress-1>", self._drag)
+    self.bind("<B1-Motion>", self._drag)
+    self.set_colors(colors)
+
+  def set(self, value):
+    self.value = value
+    self.draw()
+
+  def get(self):
+    return self.value
+
+  def set_colors(self, colors):
+    self.colors = colors
+    self.configure(bg=colors["card"])
+    self.draw()
+
+  def _x_range(self):
+    pad = 11   # half the handle, so it never overhangs the ends
+    return pad, max(self.winfo_width() - pad, pad + 1)
+
+  def _drag(self, event):
+    x0, x1 = self._x_range()
+    frac = min(max((event.x - x0) / (x1 - x0), 0), 1)
+    raw = self.from_ + frac * (self.to - self.from_)
+    value = self.from_ + round((raw - self.from_) / self.resolution) * self.resolution
+    value = max(self.from_, min(self.to, value))
+    if value != self.value:
+      self.set(value)
+      self.command(value)
+
+  def draw(self):
+    self.delete("all")
+    x0, x1 = self._x_range()
+    cy = self.HEIGHT // 2
+    self.create_line(x0, cy, x1, cy, width=self.TRACK, capstyle="round", fill=self.colors["border"])
+    span = (self.to - self.from_) or 1
+    x = x0 + (self.value - self.from_) / span * (x1 - x0)
+    self.create_image(x, cy, image=slider_thumb(self, self.colors))
+
+
+class RoundBar(tk.Canvas):
+  """The upload progress bar: a rounded track filling with red."""
+
+  HEIGHT = 8
+
+  def __init__(self, parent, colors):
+    super().__init__(parent, height=self.HEIGHT, highlightthickness=0, bd=0)
+    self.value, self.maximum = 0, 1
+    self.colors = colors
+    self.bind("<Configure>", lambda e: self.draw())
+    self.set_colors(colors)
+
+  def set_progress(self, value, maximum=None):
+    if maximum is not None:
+      self.maximum = max(maximum, 1)
+    self.value = value
+    self.draw()
+
+  def set_colors(self, colors):
+    self.colors = colors
+    self.configure(bg=colors["card"])
+    self.draw()
+
+  def draw(self):
+    self.delete("all")
+    w, h = self.winfo_width(), self.HEIGHT
+    if w <= h:
+      return
+    r = h / 2
+    self.create_line(r, r, w - r, r, width=h, capstyle="round", fill=self.colors["border"])
+    if self.value > 0:
+      x = r + (w - 2 * r) * min(self.value / self.maximum, 1)
+      self.create_line(r, r, x, r, width=h, capstyle="round", fill=self.colors["accent"])
+
+
 # ---------- Control view widgets ----------
-
-def make_slider(parent, from_, to, command, colors, resolution=1):
-  """A flat slider: grey track with a red handle, like the web page's range inputs.
-  (A classic tk.Scale, because ttk's clam Scale won't take these colours cleanly.)"""
-  scale = tk.Scale(parent, from_=from_, to=to, orient="horizontal", command=command, resolution=resolution,
-                   showvalue=0, bd=0, highlightthickness=0, sliderrelief="flat", width=12, sliderlength=24)
-  color_slider(scale, colors)
-  return scale
-
-
-def color_slider(scale, colors):
-  scale.configure(bg=colors["accent"], troughcolor=colors["border"], activebackground=colors["accent_active"])
-
 
 class ScrollFrame(ttk.Frame):
   """A frame with a vertical scrollbar; put children in .inner"""
@@ -153,7 +406,7 @@ class ScrollFrame(ttk.Frame):
   def __init__(self, parent):
     super().__init__(parent)
     self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0)
-    scroll = ttk.Scrollbar(self, command=self.canvas.yview)
+    scroll = ttk.Scrollbar(self, command=self.canvas.yview, style="Slim.Vertical.TScrollbar")
     self.canvas.configure(yscrollcommand=scroll.set)
     scroll.pack(side="right", fill="y")
     self.canvas.pack(side="left", fill="both", expand=True)
@@ -190,11 +443,11 @@ class MinMaxControl:
     self.value_label.grid(row=0, column=2, sticky="e")
 
     ttk.Button(self.frame, text="−", style="Step.TButton", command=lambda: self.step_by(-self.step)).grid(row=1, column=0, pady=(6, 0))
-    self.scale = make_slider(self.frame, self.min, self.max, self._on_scale, colors)
+    self.scale = RoundSlider(self.frame, self.min, self.max, self._on_scale, colors)
     self.scale.grid(row=1, column=1, sticky="ew", padx=10, pady=(6, 0))
     ttk.Button(self.frame, text="+", style="Step.TButton", command=lambda: self.step_by(self.step)).grid(row=1, column=2, pady=(6, 0))
-    self.scale.bind("<ButtonPress-1>", lambda e: setattr(self, "dragging", True))
-    self.scale.bind("<ButtonRelease-1>", self._on_release)
+    self.scale.bind("<ButtonPress-1>", lambda e: setattr(self, "dragging", True), add="+")
+    self.scale.bind("<ButtonRelease-1>", self._on_release, add="+")
     self._show(self.value)
 
   def _snap(self, value):
@@ -232,7 +485,7 @@ class ChannelControl:
   """One channel: label, %, output bar (blue = max power, yellow = actual, hatched = beyond the
   front-panel limit) and a -/slider/+ power row."""
 
-  BAR_HEIGHT = 12
+  BAR_HEIGHT = 10
 
   def __init__(self, parent, number, on_change, colors):
     self.on_change = on_change
@@ -253,7 +506,7 @@ class ChannelControl:
     self.bar.bind("<Configure>", lambda e: self.draw())
 
     ttk.Button(self.frame, text="−", style="Step.TButton", command=lambda: self.step_by(-CHANNEL_STEP)).grid(row=2, column=0, pady=(6, 0))
-    self.scale = make_slider(self.frame, 0, 1000, self._on_scale, colors, resolution=CHANNEL_STEP)
+    self.scale = RoundSlider(self.frame, 0, 1000, self._on_scale, colors, resolution=CHANNEL_STEP)
     self.scale.grid(row=2, column=1, sticky="ew", padx=10, pady=(6, 0))
     ttk.Button(self.frame, text="+", style="Step.TButton", command=lambda: self.step_by(CHANNEL_STEP)).grid(row=2, column=2, pady=(6, 0))
     self.set_colors(colors)
@@ -281,22 +534,29 @@ class ChannelControl:
 
   def set_colors(self, colors):
     self.colors = colors
-    self.bar.configure(bg=colors["border"])
-    color_slider(self.scale, colors)
+    self.bar.configure(bg=colors["card"])
+    self.scale.set_colors(colors)
     self.draw()
 
   def draw(self):
+    # Rounded bars: lines with round caps, so the ends are semicircles
     c, w, h = self.colors, self.bar.winfo_width(), self.BAR_HEIGHT
     self.bar.delete("all")
-    if w <= 1:
+    if w <= h:
       return
-    self.bar.create_rectangle(0, 0, w * self.max_out / 1000, h, fill=c["max"], width=0)
-    self.bar.create_rectangle(0, 3, w * self.actual / 1000, h - 3, fill=c["actual"], width=0)
+    r = h / 2
+    span = w - 2 * r
+    self.bar.create_line(r, r, w - r, r, width=h, capstyle="round", fill=c["border"])
     if self.limit < 1000:
-      x = w * self.limit / 1000
-      for hx in range(int(x) - h, w, 6):   # diagonal hatching beyond the limit
-        self.bar.create_line(max(hx, x), h - max(0, x - hx), hx + h, 0, fill=c["limit"], width=2)
-      self.bar.create_rectangle(x, 0, x + 2, h, fill=c["limit"], width=0)
+      x = r + span * self.limit / 1000
+      for hx in range(int(x) - h, int(w - r), 5):   # diagonal hatching beyond the front-panel limit
+        self.bar.create_line(max(hx, x), h - max(0, x - hx), min(hx + h, w - r), max(0, hx + h - (w - r)),
+                             fill=c["limit"], width=2)
+      self.bar.create_line(x, 0, x, h, fill=c["limit"], width=2)
+    if self.max_out > 0:
+      self.bar.create_line(r, r, r + span * self.max_out / 1000, r, width=h, capstyle="round", fill=c["max"])
+    if self.actual > 0:
+      self.bar.create_line(r, r, r + span * self.actual / 1000, r, width=h - 4, capstyle="round", fill=c["actual"])
 
 
 class ControlView(ttk.Frame):
@@ -320,7 +580,7 @@ class ControlView(ttk.Frame):
     row = ttk.Frame(inner)
     row.pack(fill="x")
     self.pattern_combo = ttk.Combobox(row, state="readonly", font=(FONT, 10))
-    self.pattern_combo.pack(side="left", fill="x", expand=True, ipady=3)
+    self.pattern_combo.pack(side="left", fill="x", expand=True)
     ttk.Button(row, text="Start", style="Primary.TButton", command=self.start).pack(side="left", padx=(10, 0))
     ttk.Button(row, text="↻", style="Step.TButton", command=self.load_patterns).pack(side="left", padx=(10, 0))
     self.picker_hint = ttk.Label(inner, text="", style="Hint.TLabel")
@@ -462,7 +722,7 @@ class ControlView(ttk.Frame):
     for channel in self.channels:
       channel.set_colors(colors)
     for control in self.minmax.values():
-      color_slider(control.scale, colors)
+      control.scale.set_colors(colors)
     if self.menu_scroll is not None:
       self.menu_scroll.canvas.configure(bg=colors["card"])
 
@@ -538,7 +798,6 @@ class App(tk.Tk):
     self.local_files = []
     self.remote_scripts = []
     self.selected_slot = None       # ZC95 slot (0-4) picked in the list, for upload and delete
-    self.cards = []
 
     settings = self.load_settings()
     self.ip_var = tk.StringVar(value=settings.get("ip", ""))
@@ -550,6 +809,8 @@ class App(tk.Tk):
     # Both themes use "clam" restyled with the web palette (the native "vista" theme ignores colours)
     self.style = ttk.Style(self)
     self.style.theme_use("clam")
+    self.skin = Skin(self, self.style)
+    self.panels = []   # RoundPanels, redrawn on a theme change
     self.apply_styles()
 
     self.build_ui()
@@ -564,37 +825,30 @@ class App(tk.Tk):
 
   # ---------- UI ----------
 
-  def card(self, parent):
-    """A bordered card like the web page's <section>. Returns (outer, inner): place outer, fill inner."""
-    c = self.colors()
-    outer = tk.Frame(parent, bd=0, highlightthickness=1, bg=c["card"],
-                     highlightbackground=c["border"], highlightcolor=c["border"])
-    inner = ttk.Frame(outer, padding=16)
-    inner.pack(fill="both", expand=True)
-    self.cards.append(outer)
-    return outer, inner
+  def card(self, parent, padding=16):
+    """A rounded card like the web page's <section>. Returns (outer, inner): place outer, fill inner."""
+    outer = RoundPanel(parent, self, 14, "card", "border", "page", padding=padding)
+    return outer, outer.inner
 
   def build_ui(self):
     # Header: view buttons, then the heading; status and theme toggle on the right (same as the web page)
     header = ttk.Frame(self, style="Page.TFrame", padding=(16, 12))
     header.pack(fill="x")
 
-    tabs_outer, tabs = self.card(header)
-    tabs.configure(padding=3)
+    tabs = RoundPanel(header, self, 16, "card", "border", "page", padding=4)
     for text, value in (("Scripts", "scripts"), ("Control", "control")):
-      ttk.Radiobutton(tabs, text=text, value=value, variable=self.view_var, style="Tab.Toolbutton",
+      ttk.Radiobutton(tabs.inner, text=text, value=value, variable=self.view_var, style="Tab.Toolbutton",
                       command=self.show_view).pack(side="left", padx=1)
-    tabs_outer.pack(side="left")
+    tabs.pack(side="left")
     ttk.Label(header, text="ZC95 Lua Manager", style="Heading.TLabel").pack(side="left", padx=14)
 
     self.theme_btn = ttk.Button(header, style="Icon.TButton", command=self.toggle_dark)
     self.theme_btn.pack(side="right")
-    status = ttk.Frame(header, style="Page.TFrame")
-    status.pack(side="right", padx=12)
-    self.led = tk.Canvas(status, width=12, height=12, highlightthickness=0)
-    self.led_dot = self.led.create_oval(1, 1, 11, 11, fill="grey", outline="")
-    self.led.pack(side="left", padx=(0, 6))
-    self.status_label = ttk.Label(status, textvariable=self.status_var, style="Status.TLabel")
+    self.status_pill = RoundPanel(header, self, 13, "page", "warn", "page", padding=(12, 6), inner_style="Page.TFrame")
+    self.status_pill.pack(side="right", padx=12)
+    self.led = ttk.Label(self.status_pill.inner, style="StatusDot.TLabel")
+    self.led.pack(side="left", padx=(0, 7))
+    self.status_label = ttk.Label(self.status_pill.inner, textvariable=self.status_var, style="Status.TLabel")
     self.status_label.pack(side="left")
 
     self.header_rule = tk.Frame(self, height=1, bd=0)
@@ -608,15 +862,14 @@ class App(tk.Tk):
     ip_outer.pack(fill="x")
     ttk.Label(ip_card, text="ZC95 IP", style="Section.TLabel").pack(side="left")
     ip_entry = ttk.Entry(ip_card, textvariable=self.ip_var, width=22, font=(FONT, 10))
-    ip_entry.pack(side="left", padx=10, ipady=3)
+    ip_entry.pack(side="left", padx=10)
     ip_entry.bind("<Return>", lambda e: self.connect_now())
     ttk.Button(ip_card, text="Connect", command=self.connect_now).pack(side="left")
     ttk.Button(ip_card, text="Save settings", command=self.save_settings_clicked).pack(side="right")
 
     # Log card, pinned to the bottom so a tall Control view can't push it off screen
-    log_outer, log_card = self.card(main)
+    log_outer, log_card = self.card(main, padding=(16, 10))
     log_outer.pack(side="bottom", fill="x")
-    log_card.configure(padding=(16, 10))
     log_head = ttk.Frame(log_card)
     log_head.pack(fill="x")
     ttk.Label(log_head, text="Log", style="H3.TLabel").pack(side="left")
@@ -625,7 +878,7 @@ class App(tk.Tk):
     log_body.pack(fill="both", expand=True, pady=(6, 0))
     self.log = tk.Text(log_body, height=6, state="disabled", wrap="word", font=(MONO, 9), bd=0,
                        highlightthickness=0, padx=0, pady=0)
-    log_scroll = ttk.Scrollbar(log_body, command=self.log.yview)
+    log_scroll = ttk.Scrollbar(log_body, command=self.log.yview, style="Slim.Vertical.TScrollbar")
     self.log.configure(yscrollcommand=log_scroll.set)
     log_scroll.pack(side="right", fill="y")
     self.log.pack(fill="both", expand=True)
@@ -645,7 +898,7 @@ class App(tk.Tk):
     row = ttk.Frame(folder_card)
     row.pack(fill="x")
     path_entry = ttk.Entry(row, textvariable=self.path_var, font=(MONO, 10))
-    path_entry.pack(side="left", fill="x", expand=True, ipady=3)
+    path_entry.pack(side="left", fill="x", expand=True)
     path_entry.bind("<Return>", lambda e: self.read_folder())
     ttk.Button(row, text="Browse...", command=self.browse).pack(side="left", padx=(10, 0))
     ttk.Button(row, text="Read", style="Primary.TButton", command=self.read_folder).pack(side="left", padx=(10, 0))
@@ -668,7 +921,7 @@ class App(tk.Tk):
     upload_row.pack(fill="x", pady=(10, 0))
     self.upload_btn = ttk.Button(upload_row, text="Upload", style="Primary.TButton", command=self.upload)
     self.upload_btn.pack(side="left")
-    self.progress = ttk.Progressbar(upload_row, mode="determinate")
+    self.progress = RoundBar(upload_row, self.colors())
     self.progress.pack(side="left", fill="x", expand=True, padx=(12, 0))
 
     right_outer, right = self.card(columns)
@@ -685,11 +938,13 @@ class App(tk.Tk):
     self.delete_btn.pack(side="left", padx=(10, 0))
 
   def make_listbox(self, parent):
-    frame = ttk.Frame(parent)
-    frame.pack(fill="both", expand=True)
+    # The list sits in a rounded "well", like the web page's list boxes
+    well = RoundPanel(parent, self, 10, "page", "border", "card", padding=(8, 8), inner_style="Well.TFrame")
+    well.pack(fill="both", expand=True)
+    frame = well.inner
     listbox = tk.Listbox(frame, exportselection=False, font=(FONT, 10), activestyle="none", bd=0,
-                         highlightthickness=1, relief="flat")
-    scroll = ttk.Scrollbar(frame, command=listbox.yview)
+                         highlightthickness=0, relief="flat")
+    scroll = ttk.Scrollbar(frame, command=listbox.yview, style="WellSlim.Vertical.TScrollbar")
     listbox.configure(yscrollcommand=scroll.set)
     scroll.pack(side="right", fill="y")
     listbox.pack(side="left", fill="both", expand=True)
@@ -829,18 +1084,20 @@ class App(tk.Tk):
     c = self.colors()
     ip = self.ip_var.get().strip()
     if not ip:
-      color, text = c["danger"], "no ZC95 IP set"
+      kind, text = "danger", "no ZC95 IP set"
     elif self.link.connected and self.link.ip == ip:
-      color, text = c["ok"], "ZC95 connected (" + ip + ")"
+      kind, text = "ok", "ZC95 connected (" + ip + ")"
     elif self.available:
-      color, text = c["ok"], "ZC95 available (" + ip + ")"
+      kind, text = "ok", "ZC95 available (" + ip + ")"
     elif self.available is None:
-      color, text = c["warn"], "checking..."
+      kind, text = "warn", "checking..."
     else:
-      color, text = c["danger"], "ZC95 not reachable (" + ip + ")"
+      kind, text = "danger", "ZC95 not reachable (" + ip + ")"
     self.status_var.set(text)
-    self.style.configure("Status.TLabel", foreground=color)
-    self.led.itemconfigure(self.led_dot, fill=color)
+    # A pill outlined in the status colour, with a matching dot, like the web page
+    self.status_pill.set_outline(kind)
+    self.style.configure("Status.TLabel", foreground=c[kind])
+    self.led.configure(image=self.skin.image("dot:" + kind, 10, 10, 5, c[kind]))
 
   # ---------- Local scripts ----------
 
@@ -924,7 +1181,7 @@ class App(tk.Tk):
 
   def do_upload(self, msgs, name, lines, index):
     print("Uploading " + name + " to slot " + str(index) + "...")
-    self.on_ui(self.progress.configure, {"maximum": max(len(lines), 1), "value": 0})
+    self.on_ui(self.progress.set_progress, 0, len(lines))
 
     if msgs.SendLuaStart(index) is None:
       print("Upload failed: ZC95 rejected start of upload")
@@ -934,7 +1191,7 @@ class App(tk.Tk):
       if msgs.SendLuaLine(line_number, line) is None:
         print("Upload failed on line " + str(line_number + 1))
         return
-      self.on_ui(self.progress.configure, {"value": line_number + 1})
+      self.on_ui(self.progress.set_progress, line_number + 1)
 
     # This step fails if the script is invalid Lua
     if msgs.SendLuaEnd() is None:
@@ -999,9 +1256,10 @@ class App(tk.Tk):
     self.save_settings(dark=self.dark_var.get())  # the theme choice is remembered straight away
 
   def apply_styles(self):
-    """Configure every ttk style from the current palette."""
+    """Configure every ttk style from the current palette, and (re)draw the rounded skin."""
     c = self.colors()
     s = self.style
+    k = self.skin
     base = (FONT, 10)
 
     # Default: widgets sit on cards
@@ -1010,6 +1268,82 @@ class App(tk.Tk):
                 selectbackground=c["accent"], selectforeground=c["accent_text"], insertcolor=c["text"],
                 arrowcolor=c["muted"], focuscolor=c["card"])
     s.map(".", foreground=[("disabled", c["muted"])])
+
+    # (Rounded panels - cards, list wells, the tab box, the status pill - are RoundPanels, drawn on canvases)
+    s.configure("Well.TFrame", background=c["page"])
+    s.configure("StatusDot.TLabel", background=c["page"], padding=0)
+
+    # ----- rounded buttons: secondary (default), primary, danger, hold, step, icon -----
+    bold = (FONT, 10, "bold")
+    k.element("Secondary.border", 9, [("", c["page"], c["border"]), ("disabled", c["page"], c["border"]),
+                                      ("pressed", c["border"], c["border"]), ("active", c["hover"], c["border"])])
+    k.button("TButton", "Secondary.border")
+    s.configure("TButton", background=c["card"], foreground=c["text"], padding=(14, 5), font=bold, anchor="center")
+    s.map("TButton", foreground=[("disabled", c["muted"])])
+
+    k.element("Primary.border", 9, [("", c["accent"], None), ("disabled", c["border"], None),
+                                    ("pressed", c["accent_active"], None), ("active", c["accent_active"], None)])
+    k.button("Primary.TButton", "Primary.border")
+    s.configure("Primary.TButton", foreground=c["accent_text"])
+    s.map("Primary.TButton", foreground=[("disabled", c["muted"])])
+
+    k.element("Danger.border", 9, [("", c["danger"], None), ("pressed", c["danger_active"], None),
+                                   ("active", c["danger_active"], None)])
+    k.button("Danger.TButton", "Danger.border")
+    s.configure("Danger.TButton", foreground="#ffffff")
+
+    k.element("Hold.border", 12, [("", c["page"], c["border"]), ("pressed", c["accent"], None),
+                                  ("active", c["hover"], c["border"])])
+    k.button("Hold.TButton", "Hold.border")
+    s.map("Hold.TButton", foreground=[("pressed", c["accent_text"])])
+
+    k.button("Step.TButton", "Secondary.border")
+    s.configure("Step.TButton", padding=(0, 3), width=3, font=(FONT, 12))
+
+    k.element("Icon.border", 15, [("", c["card"], c["border"]), ("active", c["hover"], c["border"])])
+    k.button("Icon.TButton", "Icon.border")
+    s.configure("Icon.TButton", background=c["page"], padding=(9, 4), width=2, font=(FONT, 11))
+
+    s.layout("Link.TButton", [("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})])
+    s.configure("Link.TButton", background=c["card"], foreground=c["muted"], borderwidth=0, padding=(2, 0),
+                lightcolor=c["card"], darkcolor=c["card"], bordercolor=c["card"], font=(FONT, 9))
+    s.map("Link.TButton", background=[("active", c["card"])], foreground=[("active", c["text"])],
+          lightcolor=[("active", c["card"])], darkcolor=[("active", c["card"])])
+
+    # ----- pill toggles: the Scripts / Control tabs and pattern choices, red when selected -----
+    k.element("Tab.border", 13, [("", c["card"], None), ("selected", c["accent"], None), ("active", c["hover"], None)])
+    k.button("Tab.Toolbutton", "Tab.border", label="Toolbutton")
+    s.configure("Tab.Toolbutton", background=c["card"], foreground=c["muted"], padding=(18, 5), font=bold)
+    s.map("Tab.Toolbutton", foreground=[("selected", c["accent_text"]), ("active", c["text"])])
+
+    k.element("Choice.border", 14, [("", c["page"], c["border"]), ("selected", c["accent"], None),
+                                    ("active", c["hover"], c["border"])])
+    k.button("Choice.Toolbutton", "Choice.border", label="Toolbutton")
+    s.configure("Choice.Toolbutton", background=c["card"], foreground=c["text"], padding=(16, 5))
+    s.map("Choice.Toolbutton", foreground=[("selected", c["accent_text"])])
+
+    # ----- rounded text fields (Entry, Combobox) with a red outline when focused -----
+    k.element("Field.field", 9, [("", c["page"], c["border"]), ("focus", c["page"], c["accent"])], padding=(10, 6))
+    s.layout("TEntry", [("Field.field", {"sticky": "nsew", "children": [
+      ("Entry.padding", {"sticky": "nsew", "children": [("Entry.textarea", {"sticky": "nsew"})]})]})])
+    s.configure("TEntry", padding=(0, 1), foreground=c["text"])
+    s.layout("TCombobox", [("Field.field", {"sticky": "nsew", "children": [
+      ("Combobox.downarrow", {"side": "right", "sticky": "ns"}),
+      ("Combobox.padding", {"sticky": "nsew", "children": [("Combobox.textarea", {"sticky": "nsew"})]})]})])
+    s.configure("TCombobox", padding=(0, 1), arrowcolor=c["text"], background=c["page"], bordercolor=c["page"],
+                lightcolor=c["page"], darkcolor=c["page"], arrowsize=13)
+    s.map("TCombobox", fieldbackground=[("readonly", c["page"])], foreground=[("readonly", c["text"])],
+          selectbackground=[("readonly", c["page"])], selectforeground=[("readonly", c["text"])],
+          background=[("active", c["page"]), ("readonly", c["page"])])
+
+    # ----- slim rounded scrollbars (on cards, and inside the list wells) -----
+    k.element("Slim.thumb", 4, [("", c["thumb"], None), ("active", c["thumb_active"], None)],
+              size=(8, 10 + self.skin.CENTRE), border=(0, 5), padding=0, min_size=(8, 11))
+    for name, trough in (("Slim", c["card"]), ("WellSlim", c["page"])):
+      s.layout(name + ".Vertical.TScrollbar", [("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
+        ("Slim.thumb", {"expand": "1", "sticky": "nswe"})]})])
+      s.configure(name + ".Vertical.TScrollbar", troughcolor=trough, background=trough, bordercolor=trough,
+                  lightcolor=trough, darkcolor=trough, width=8)
 
     s.configure("Page.TFrame", background=c["page"])
     s.configure("Heading.TLabel", background=c["page"], font=(FONT, 13, "bold"))
@@ -1022,56 +1356,6 @@ class App(tk.Tk):
     s.configure("Hint.TLabel", foreground=c["muted"], font=(FONT, 8))
     s.configure("Warn.TLabel", foreground=c["warn"], font=(FONT, 8, "bold"))
 
-    # Buttons: secondary (default), primary (red), danger, step (-/+), link, icon
-    s.configure("TButton", background=c["page"], foreground=c["text"], bordercolor=c["border"],
-                lightcolor=c["page"], darkcolor=c["page"], padding=(14, 6), font=(FONT, 10, "bold"))
-    s.map("TButton", background=[("disabled", c["page"]), ("pressed", c["border"]), ("active", c["hover"])],
-          lightcolor=[("active", c["hover"])], darkcolor=[("active", c["hover"])])
-    s.configure("Primary.TButton", background=c["accent"], foreground=c["accent_text"], bordercolor=c["accent"],
-                lightcolor=c["accent"], darkcolor=c["accent"])
-    s.map("Primary.TButton",
-          background=[("disabled", c["border"]), ("pressed", c["accent_active"]), ("active", c["accent_active"])],
-          lightcolor=[("active", c["accent_active"])], darkcolor=[("active", c["accent_active"])],
-          bordercolor=[("disabled", c["border"]), ("active", c["accent_active"])],
-          foreground=[("disabled", c["muted"])])
-    s.configure("Danger.TButton", background=c["danger"], foreground="#ffffff", bordercolor=c["danger"],
-                lightcolor=c["danger"], darkcolor=c["danger"])
-    s.map("Danger.TButton", background=[("active", c["danger_active"])], lightcolor=[("active", c["danger_active"])],
-          darkcolor=[("active", c["danger_active"])], bordercolor=[("active", c["danger_active"])])
-    s.configure("Hold.TButton", padding=(14, 6))
-    s.map("Hold.TButton", background=[("pressed", c["accent"]), ("active", c["hover"])],
-          foreground=[("pressed", c["accent_text"])])
-    s.configure("Step.TButton", padding=(0, 4), width=3, font=(FONT, 12))
-    s.configure("Link.TButton", background=c["card"], foreground=c["muted"], borderwidth=0, padding=(2, 0),
-                lightcolor=c["card"], darkcolor=c["card"], bordercolor=c["card"], font=(FONT, 9))
-    s.map("Link.TButton", background=[("active", c["card"])], foreground=[("active", c["text"])],
-          lightcolor=[("active", c["card"])], darkcolor=[("active", c["card"])])
-    s.configure("Icon.TButton", background=c["card"], padding=(8, 4), width=2, font=(FONT, 11))
-
-    # Tabs (Scripts / Control) and the pattern choice buttons: red when selected
-    s.configure("Tab.Toolbutton", background=c["card"], foreground=c["muted"], padding=(18, 6),
-                font=(FONT, 10, "bold"), borderwidth=0)
-    s.map("Tab.Toolbutton", background=[("selected", c["accent"]), ("active", c["hover"])],
-          foreground=[("selected", c["accent_text"]), ("active", c["text"])])
-    s.configure("Choice.Toolbutton", background=c["page"], foreground=c["text"], padding=(14, 5),
-                bordercolor=c["border"], relief="solid", borderwidth=1)
-    s.map("Choice.Toolbutton", background=[("selected", c["accent"]), ("active", c["hover"])],
-          foreground=[("selected", c["accent_text"])], bordercolor=[("selected", c["accent"])])
-
-    s.configure("TEntry", fieldbackground=c["page"], bordercolor=c["border"], lightcolor=c["page"],
-                darkcolor=c["page"], padding=6)
-    s.map("TEntry", bordercolor=[("focus", c["accent"])], lightcolor=[("focus", c["page"])])
-    s.configure("TCombobox", fieldbackground=c["page"], background=c["page"], bordercolor=c["border"],
-                lightcolor=c["page"], darkcolor=c["page"], padding=6, arrowcolor=c["text"])
-    s.map("TCombobox", fieldbackground=[("readonly", c["page"])], foreground=[("readonly", c["text"])],
-          selectbackground=[("readonly", c["page"])], selectforeground=[("readonly", c["text"])],
-          background=[("active", c["hover"]), ("readonly", c["page"])])
-    s.configure("TScrollbar", background=c["card"], troughcolor=c["card"], bordercolor=c["card"],
-                lightcolor=c["card"], darkcolor=c["card"], arrowcolor=c["muted"])
-    s.map("TScrollbar", background=[("active", c["hover"])])
-    s.configure("Horizontal.TProgressbar", background=c["accent"], troughcolor=c["border"], bordercolor=c["border"],
-                lightcolor=c["accent"], darkcolor=c["accent"], thickness=8)
-
   def apply_theme(self):
     dark = self.dark_var.get()
     c = self.colors()
@@ -1079,14 +1363,13 @@ class App(tk.Tk):
 
     self.configure(bg=c["page"])
     self.header_rule.configure(bg=c["border"])
-    self.led.configure(bg=c["page"])
     self.theme_btn.configure(text="☾" if dark else "☀")   # moon / sun, as on the web page
-    for outer in self.cards:
-      if outer.winfo_exists():
-        outer.configure(bg=c["card"], highlightbackground=c["border"], highlightcolor=c["border"])
+    self.progress.set_colors(c)
+    self.panels = [p for p in self.panels if p.winfo_exists()]
+    for panel in self.panels:
+      panel.draw()
     for listbox in (self.local_list, self.remote_list):
-      listbox.configure(bg=c["page"], fg=c["text"], selectbackground=c["accent"], selectforeground=c["accent_text"],
-                        highlightbackground=c["border"], highlightcolor=c["border"])
+      listbox.configure(bg=c["page"], fg=c["text"], selectbackground=c["accent"], selectforeground=c["accent_text"])
     for i, script in enumerate(self.remote_scripts):
       if not script.get("Name"):
         self.remote_list.itemconfigure(i, foreground=c["muted"])
