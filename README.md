@@ -1,15 +1,38 @@
 # ZC95 Lua Manager
 
-A Windows desktop app for a [ZC95](https://github.com/CrashOverride85/zc95) connected over WiFi.
+![ZC95 Lua Manager, Scripts view in dark mode](images/dark-scripts.jpg)
 
-- **Scripts**: upload Lua scripts from a folder on your PC to the ZC95's slots 0-4, and list or delete the
-  scripts already on the box.
-- **Control**: start a pattern and drive it (menu options, soft button, channel power), like the browser
-  remote in `webgui.py`.
+ZC95 Lua Manager is a Windows desktop app for managing and controlling a
+[ZC95](https://github.com/CrashOverride85/zc95) over WiFi. Instead of uploading Lua scripts from the command
+line, you point the app at a folder of scripts on your PC, pick one, pick a slot on the box, and click
+**Upload**.
 
-Also included: dark mode, and a log pane that shows ZC95 errors and Lua `print()` output.
+The app has two views, chosen with the buttons at the top left:
 
-## Option 1: download the app (no Python needed)
+- **Scripts**: lists the `.lua` scripts in a folder on your PC alongside the scripts already on the ZC95
+  (slots 0-4). Select a local script and a slot to upload it, or delete a script from a slot. A progress bar
+  shows the upload.
+- **Control**: start any pattern on the ZC95 and drive it from your PC: change its menu settings, hold its
+  soft button, and set each channel's power, with live bars showing the power and output the box is using.
+  It works like the ZC95's browser remote (`webgui.py`), without needing a web server.
+
+**Choosing a pattern**
+
+![Control view, choosing a pattern to start](images/dark-control-list.jpg)
+
+**A pattern running**
+
+![Control view, pattern settings and channel power while a pattern runs](images/dark-control-levels.jpg)
+
+It also has:
+
+- A connection status indicator that checks the ZC95 every 5 seconds.
+- A log pane showing connection messages, errors from the ZC95 and `print()` output from running Lua scripts.
+- Light and dark themes, and saved settings (ZC95 IP address and scripts folder).
+
+## Installation
+
+### Option 1: download the app (no Python needed)
 
 1. Go to [Releases](https://github.com/SedyDev23/zc95_app/releases) and download the latest
    `ZC95-Lua-Manager-....zip`.
@@ -18,7 +41,7 @@ Also included: dark mode, and a log pane that shows ZC95 errors and Lua `print()
 The exe isn't code-signed, so the first time Windows may show "Windows protected your PC". Click
 **More info**, then **Run anyway**.
 
-## Option 2: run from the source code
+### Option 2: run from the source code
 
 1. Install **Python 3.8+** from [python.org](https://www.python.org/downloads/windows/). Tick
    "Add python.exe to PATH" and keep "tcl/tk" selected.
