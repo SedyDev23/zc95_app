@@ -2,7 +2,7 @@
 
 ![ZC95 Lua Manager, Scripts view in dark mode](images/dark-scripts.jpg)
 
-ZC95 Lua Manager is a Windows desktop app for managing and controlling a
+ZC95 Lua Manager is a desktop app for Windows and Linux for managing and controlling a
 [ZC95](https://github.com/CrashOverride85/zc95) over WiFi. Instead of uploading Lua scripts from the command
 line, you point the app at a folder of scripts on your PC, pick one, pick a slot on the box, and click
 **Upload**.
@@ -32,7 +32,9 @@ It also has:
 
 ## Installation
 
-### Option 1: download the app (no Python needed)
+### Windows
+
+#### Option 1: download the app (no Python needed)
 
 1. Go to [Releases](https://github.com/SedyDev23/zc95_app/releases) and download the latest
    `ZC95-Lua-Manager-....zip`.
@@ -41,7 +43,7 @@ It also has:
 The exe isn't code-signed, so the first time Windows may show "Windows protected your PC". Click
 **More info**, then **Run anyway**.
 
-### Option 2: run from the source code
+#### Option 2: run from the source code
 
 1. Install **Python 3.8+** from [python.org](https://www.python.org/downloads/windows/). Tick
    "Add python.exe to PATH" and keep "tcl/tk" selected.
@@ -53,6 +55,49 @@ The exe isn't code-signed, so the first time Windows may show "Windows protected
    ```
 
 3. Double-click `remote_access\ZC95 Lua Manager.bat`, or run `py zc95_lua_manager.py`.
+
+### Linux
+
+On Linux the app runs from the source code. It needs a desktop session to show its window, so it won't
+run on a headless server or container. These steps are for Debian, Ubuntu and Raspberry Pi OS.
+
+1. Install Python, Tkinter and git (leave out `sudo` if you're logged in as root):
+
+   ```
+   sudo apt update && sudo apt install -y python3 python3-tk python3-venv git
+   ```
+
+   On Fedora use `sudo dnf install -y python3 python3-tkinter git`, and on Arch
+   `sudo pacman -S --needed python tk git`.
+
+2. Download the code:
+
+   ```
+   git clone https://github.com/SedyDev23/zc95_app.git
+   cd zc95_app/remote_access
+   ```
+
+3. Create a virtual environment and install the one extra package. Recent Debian and Ubuntu releases don't
+   allow `pip install` into the system Python, and `--system-site-packages` lets the environment use the
+   Tkinter installed in step 1.
+
+   ```
+   python3 -m venv --system-site-packages .venv
+   .venv/bin/pip install -r requirements-manager.txt
+   ```
+
+4. Run the app from the `remote_access` folder:
+
+   ```
+   .venv/bin/python zc95_lua_manager.py
+   ```
+
+On Linux the window's title bar follows your desktop theme rather than the app's dark mode, and the fonts
+may look slightly different from the screenshots. **Save settings** writes to
+`remote_access/zc95_lua_manager/settings.json`.
+
+If you get `No module named 'tkinter'`, the `python3-tk` package isn't installed. If you get
+`no display name and no $DISPLAY environment variable`, there's no desktop session to show the window in.
 
 See [remote_access/ZC95_LUA_MANAGER.md](remote_access/ZC95_LUA_MANAGER.md) for full instructions.
 
